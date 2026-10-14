@@ -1,3 +1,38 @@
-﻿venv/
+﻿# Virtual Environments
+venv/
+.venv/
+env/
+
+# Python Cache
 __pycache__/
+*.py[cod]
+*$py.class
+
+# Environment Secrets
 .env
+.env.local
+
+# ML Models & Ultralytics Artifacts
+*.pt
+runs/
+weights/
+
+# Datasets & Zip Archives
+*.zip
+dataset/
+
+# Test / Cache Frames (prevents leaking temporary visitor frames)
+*.jpg
+*.jpeg
+*.png
+!assets/*.png
+!assets/*.jpg
+
+# Editor / System
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local Database & State
+ring_deskpass.db
+latest_visitor.json
