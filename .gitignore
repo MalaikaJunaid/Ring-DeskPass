@@ -11,6 +11,7 @@ __pycache__/
 # Environment Secrets
 .env
 .env.local
+ring_token.cache
 
 # ML Models & Ultralytics Artifacts
 *.pt
@@ -36,3 +37,11 @@ Thumbs.db
 # Local Database & State
 ring_deskpass.db
 latest_visitor.json
+queued_snapshots/
+
+# Deployable AWS build artifacts
+.aws-sam/
+deployable/.aws-sam/
+deployable/.venv/
+deployable/ring-credentials.json
+deployable/scripts/visitors.json

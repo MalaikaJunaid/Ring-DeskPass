@@ -1,0 +1,10 @@
+[
+  {
+    "visitor_id": "demo-vendor-001",
+    "name": "Demo Vendor",
+    "company": "Example Services",
+    "status": "ACTIVE",
+    "valid_from": "2026-10-15T00:00:00+00:00",
+    "valid_until": "2026-10-16T00:00:00+00:00"
+  }
+]

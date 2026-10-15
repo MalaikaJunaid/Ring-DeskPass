@@ -1,0 +1,384 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Ring DeskPass deployable event pipeline for a single site.
+
+Parameters:
+  RingCredentialsSecretArn:
+    Type: String
+    Description: Secrets Manager ARN containing Ring OAuth, webhook, and receptionist credentials.
+  BedrockModelId:
+    Type: String
+    Default: amazon.nova-micro-v1:0
+    Description: Bedrock model ID enabled in this account and region.
+  SiteId:
+    Type: String
+    Default: main-office
+    AllowedPattern: "^[A-Za-z0-9_-]{1,64}$"
+  EventRetentionDays:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    MaxValue: 365
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures:
+      - arm64
+    MemorySize: 512
+    Timeout: 30
+    Environment:
+      Variables:
+        EVENTS_TABLE: !Ref EventsTable
+        AUDIT_TABLE: !Ref AuditTable
+        VISITORS_TABLE: !Ref VisitorsTable
+        RING_CREDENTIALS_SECRET_ARN: !Ref RingCredentialsSecretArn
+        RING_API_BASE_URL: https://api.amazonvision.com
+        RING_OAUTH_URL: https://oauth.ring.com/oauth/token
+        SITE_ID: !Ref SiteId
+        EVENT_RETENTION_DAYS: !Ref EventRetentionDays
+        BEDROCK_MODEL_ID: !Ref BedrockModelId
+
+Resources:
+  EventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: site_id
+          AttributeType: S
+        - AttributeName: event_id
+          AttributeType: S
+        - AttributeName: created_at_event
+          AttributeType: S
+      KeySchema:
+        - AttributeName: site_id
+          KeyType: HASH
+        - AttributeName: event_id
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: by_site_created_at
+          KeySchema:
+            - AttributeName: site_id
+              KeyType: HASH
+            - AttributeName: created_at_event
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  VisitorsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: site_id
+          AttributeType: S
+        - AttributeName: visitor_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: site_id
+          KeyType: HASH
+        - AttributeName: visitor_id
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+
+  AuditTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: site_id
+          AttributeType: S
+        - AttributeName: audit_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: site_id
+          KeyType: HASH
+        - AttributeName: audit_id
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  RingEventDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  RingEventQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 720
+      MessageRetentionPeriod: 345600
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt RingEventDeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  RingApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      TracingEnabled: true
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          ThrottlingBurstLimit: 20
+          ThrottlingRateLimit: 10
+      Auth:
+        DefaultAuthorizer: ReceptionistAuthorizer
+        Authorizers:
+          ReceptionistAuthorizer:
+            UserPoolArn: !GetAtt ReceptionistUserPool.Arn
+
+  ReceptionistUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      AutoVerifiedAttributes:
+        - email
+      EnabledMfas:
+        - SOFTWARE_TOKEN_MFA
+      MfaConfiguration: ON
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 14
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true
+          TemporaryPasswordValidityDays: 2
+      UserPoolName: !Sub "${AWS::StackName}-receptionists"
+
+  ReceptionistUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref ReceptionistUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      AccessTokenValidity: 15
+      IdTokenValidity: 15
+      RefreshTokenValidity: 1
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+      PreventUserExistenceErrors: ENABLED
+
+  ReceptionistGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      Description: Authorized staff who may review visitor events.
+      GroupName: Receptionists
+      Precedence: 1
+      UserPoolId: !Ref ReceptionistUserPool
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: deskpass.api.lambda_handler
+      FunctionName: !Sub "${AWS::StackName}-api"
+      ReservedConcurrentExecutions: 10
+      Environment:
+        Variables:
+          RING_EVENT_QUEUE_URL: !Ref RingEventQueue
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref RingCredentialsSecretArn
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+                - dynamodb:Query
+              Resource:
+                - !GetAtt EventsTable.Arn
+                - !Sub "${EventsTable.Arn}/index/*"
+                - !GetAtt VisitorsTable.Arn
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+              Resource: !GetAtt AuditTable.Arn
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource: !GetAtt RingEventQueue.Arn
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}
+      Events:
+        Health:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RingApi
+            Path: /healthz
+            Method: GET
+            Auth:
+              Authorizer: NONE
+        RingWebhook:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RingApi
+            Path: /webhook/ring
+            Method: POST
+            Auth:
+              Authorizer: NONE
+        ListEvents:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RingApi
+            Path: /admin/events
+            Method: GET
+        ReviewEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RingApi
+            Path: /admin/events/{event_id}/review
+            Method: POST
+        EventSummary:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RingApi
+            Path: /admin/events/{event_id}/summary
+            Method: POST
+
+  WorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: deskpass.worker.lambda_handler
+      FunctionName: !Sub "${AWS::StackName}-worker"
+      Timeout: 120
+      MemorySize: 1024
+      ReservedConcurrentExecutions: 1
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+                - secretsmanager:PutSecretValue
+              Resource: !Ref RingCredentialsSecretArn
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+                - dynamodb:Query
+              Resource:
+                - !GetAtt EventsTable.Arn
+                - !Sub "${EventsTable.Arn}/index/*"
+                - !GetAtt VisitorsTable.Arn
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+              Resource: !GetAtt AuditTable.Arn
+            - Effect: Allow
+              Action:
+                - rekognition:DetectText
+              Resource: "*"
+      Events:
+        RingEvents:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt RingEventQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-api"
+      RetentionInDays: 30
+
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-worker"
+      RetentionInDays: 30
+
+  DeadLetterQueueAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: A Ring event could not be processed after retries.
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 1
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Period: 300
+      Statistic: Maximum
+      Threshold: 0
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt RingEventDeadLetterQueue.QueueName
+
+  ApiErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: The DeskPass API Lambda returned an error.
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 1
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 300
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ApiFunction
+
+  WorkerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: The Ring event worker returned an error.
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 1
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 300
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref WorkerFunction
+
+Outputs:
+  ApiBaseUrl:
+    Description: Configure this HTTPS base URL in the Ring Developer Portal webhook settings.
+    Value: !Sub https://${RingApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/prod
+  EventsTableName:
+    Value: !Ref EventsTable
+  VisitorsTableName:
+    Value: !Ref VisitorsTable
+  AuditTableName:
+    Value: !Ref AuditTable
+  DeadLetterQueueUrl:
+    Value: !Ref RingEventDeadLetterQueue
+  ReceptionistUserPoolId:
+    Value: !Ref ReceptionistUserPool
+  ReceptionistClientId:
+    Value: !Ref ReceptionistUserPoolClient
+  ReceptionistGroupName:
+    Value: !Ref ReceptionistGroup

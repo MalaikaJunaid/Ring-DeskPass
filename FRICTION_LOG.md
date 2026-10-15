@@ -1,114 +1,52 @@
+# Friction Log
 
-### Entry 01: Ring Ecosystem Constraints & Webhook Architecture
+This log records observed development issues and their workarounds. It does not claim a live Ring integration, a production deployment, or a judging bonus. Personal identity document contents and credentials are intentionally excluded.
 
-* **Task Attempted:** Clone the `ring-api-helloworld` starter code, query API endpoints locally, and design a LAN-based integration for SMB front-desk execution.
+## Entry 01: Ring runtime access
 
+- **Attempt:** Explore the Ring Partner API and build an event-driven visitor workflow.
+- **Friction:** No authorized Ring simulator/test device was available to verify OAuth, event delivery, the production payload, or snapshot retrieval. Playground credentials are not a substitute for a durable, live test.
+- **Workaround:** Keep the existing local demo explicitly synthetic, and isolate the unvalidated official-API path in `deployable/`.
+- **Remaining:** Obtain approved test access and demonstrate the required runtime flow before claiming Ring-track compliance.
 
-* **Steps Taken:**
-* Attempted `gh repo clone` but lacked the GitHub CLI executable, requiring a standard HTTPS clone.
+## Entry 02: Local camera and hardware testing
 
+- **Attempt:** Exercise camera capture from the local application.
+- **Friction:** Local camera access was unreliable in the development environment.
+- **Workaround:** Use an in-memory synthetic badge image for the device-free demo rather than relying on a camera or real identity document.
+- **Remaining:** The synthetic flow does not validate Ring devices or the official Ring simulator.
 
-* Generated a Playground Bearer token and tested the FastAPI server on `localhost:8000/webhook/ring`.
+## Entry 03: OCR and sensitive test data
 
+- **Attempt:** Evaluate badge/name extraction with image processing and OCR.
+- **Friction:** OCR results on real identity documents were not dependable enough for access decisions, and real IDs must not be included in public artifacts.
+- **Workaround:** Use synthetic badges for demos; exclude identity-document images and extracted text from logs and submissions.
+- **Remaining:** Validate recognition only with synthetic or properly authorized test data. Any uncertain match must remain a human-review case.
 
+## Entry 04: Cloud service access
 
+- **Attempt:** Prepare the separate AWS-backed path and explore cloud-service integrations.
+- **Friction:** The configured IAM Identity Center account instance authenticated the browser session but reported “No AWS accounts are available to you.” No AWS service credentials or deployment role were available.
+- **Workaround:** Keep the demo local and do not deploy. Unit tests, SAM lint, and local package builds do not require AWS account access.
+- **Remaining:** An administrator must assign an AWS account and deployment role before any AWS deployment can be attempted. No cloud resources were deployed during these checks.
 
-* **Actual Result:** The Playground token expired strictly after 30 minutes, blocking continuous testing. More critically, Ring devices operate exclusively in a gated cloud ecosystem and cannot send local LAN webhooks, requiring HTTPS cloud endpoints and OAuth 2.0.
+## Entry 05: Containerized Lambda build
 
+- **Attempt:** Build the Python 3.12 ARM64 Lambda packages with SAM.
+- **Friction:** Docker Desktop's Linux engine initially did not start, and SAM could not build the containerized package.
+- **Workaround:** Start Docker Desktop, verify its Linux engine, and rerun `sam build --use-container`. The Python 3.12 ARM64 build then succeeded locally.
+- **Remaining:** This is packaging validation only; it does not validate AWS deployment or Ring behavior.
 
-* **Severity Rating:** Critical (Pitch Level)
-* **Workaround Implemented:** Stored the `device_id` locally in `.env` to minimize API calls during inference testing. Pivoted the business pitch from a "local script" to a cloud-native prototype designed for the Ring Appstore, utilizing our existing HMAC-SHA256 signature verification to mimic Ring's production security.
+## Entry 06: Python dependency isolation
 
+- **Attempt:** Check both the prototype and deployable dependency sets.
+- **Friction:** The shared development environment contained unrelated packages with conflicting protobuf requirements. A clean check of the shared environment therefore did not prove the deployable dependency set was sound.
+- **Workaround:** Create `deployable/.venv` with Python 3.12 and install only `deployable/requirements.txt`.
+- **Result:** The isolated deployable environment passed `pip check`; all 12 deployable unit tests passed.
 
-* **Actionable Suggestion for Ring:** Provide 24-hour sandbox tokens for local development and explicitly document that local LAN event polling is unsupported.
+## Entry 07: Submission boundary
 
-
-
-### Entry 02: Hardware Resource Locks & OpenCV Stream Detachment
-
-* **Task Attempted:** Initialize a live webcam feed via OpenCV inside a FastAPI background process to capture visitor snapshots upon receiving a doorbell webhook.
-
-
-* **Steps Taken:**
-* Configured `cv2.VideoCapture(0)` across multiple Windows backends (DSHOW, MSMF).
-
-
-* Triggered the webhook, resulting in an unhandled exception during the read step.
-
-
-
-
-* **Actual Result:** The FastAPI crash left zombie Python processes running. Windows DirectShow aggressively locked the camera hardware to the dangling process, returning `[ERROR] Camera index out of range` and preventing subsequent initializations.
-
-
-* **Severity Rating:** High
-* **Workaround Implemented:** Used PowerShell (`Stop-Process -Force`) to kill hanging processes. Abandoned the live webcam feed for a `live_demo_simulator.py` static image pipeline to bypass Windows hardware drivers entirely.
-
-
-* **Actionable Suggestion for Framework Maintainers:** OpenCV Python bindings require a strict context manager (e.g., `with cv2.VideoCapture(0) as cap:`) to guarantee hardware release on thread exceptions.
-
-
-
-### Entry 03: Edge OCR Reliability on Holographic Substrates
-
-* **Task Attempted:** Extract an English name from a UAE government ID card using local edge inference (EasyOCR) following YOLO bounding box detection.
-
-
-* **Steps Taken:**
-* Detected the badge via `best.pt`, applied OpenCV preprocessing (CLAHE, bilateral filtering, high-pass sharpening), and passed the crop to EasyOCR.
-
-
-
-
-* **Actual Result:** EasyOCR failed on the ID's microprint, multi-language text, and holographic overlays, outputting mangled strings (e.g., `datara /ta du4karnad`). This triggered a 60% fuzzy match failure and a false "ACCESS DENIED" state.
-
-
-* **Severity Rating:** Medium
-* **Workaround Implemented:** Substituted the real ID with a synthetic, high-contrast digital badge for the demo, ensuring 100% accuracy and eliminating PII exposure risks for the public Devpost submission.
-
-
-* **Actionable Suggestion for Edge Deployment:** Standard OCR is insufficient for complex documents; production deployments require Multimodal LLM Vision pipelines natively trained to ignore holographic noise.
-
-
-
-### Entry 04: Cloud AI Volatility & Service Access Blocks
-
-* **Task Attempted:** Execute LLM orchestration via AWS Bedrock (Claude) with a fallback to Google Gemini to route security system logic.
-
-
-* **Steps Taken:**
-* Initialized `boto3` for Bedrock and integrated the `google-genai` SDK for Gemini.
-
-
-
-
-* **Actual Result:** AWS immediately rejected the Bedrock call (`Error 002`) due to new-account model access blocks and delayed hackathon credits. When falling back to Gemini, rapid sequential testing triggered `503 UNAVAILABLE` API spikes, throwing `errors.APIError` and crashing the FastAPI server.
-
-
-* **Severity Rating:** High (Strategic)
-* **Workaround Implemented:** Broadened the `try/except` block to catch `google.genai.errors` and engineered a zero-latency "Hackathon Safety Net." If APIs spike, the server catches the error, injects a hardcoded local fallback plan, and returns a 200 OK to keep the dashboard alive.
-
-
-* **Actionable Suggestion for AWS & System Architecture:** AWS should provide a frictionless sandbox tier for base models. Developers must always decouple external LLM volatility from core physical security routing servers.
-
-
-
-### Entry 05: Compliance Telemetry IAM Friction
-
-* **Task Attempted:** Ship immutable, PII-scrubbed access trails to AWS CloudWatch Logs.
-
-
-* **Steps Taken:**
-* Configured `ComplianceAuditLogger` to automatically call `create_log_group` and `put_log_events`.
-
-
-
-
-* **Actual Result:** Strict AWS IAM defaults (missing `logs:CreateLogGroup` policies) caused `boto3` to throw fatal exceptions, crashing the entire webhook response cycle.
-
-
-* **Severity Rating:** Medium
-* **Workaround Implemented:** Wrapped cloud logging initializations in strict `try/except` blocks. If IAM permissions fail, the system toggles a `cloudwatch_enabled = False` flag and gracefully degrades to saving records in a local SQLite database (`ring_deskpass.db`).
-
-
-* **Actionable Suggestion for Architecture:** Secondary compliance telemetry must never break the primary physical security pipeline; Boto3 cloud logging should always be strictly decoupled.
+- **Attempt:** Assess whether the current no-device prototype demonstrates the Ring track.
+- **Friction:** The local synthetic webhook is not an official Ring API, SDK, simulator, or device demonstration.
+- **Workaround:** Document the local project as a prototype and keep Ring runtime claims out of its description.
+- **Remaining:** The saved hackathon rules require a Ring-runtime demo through an API, SDK, simulator, or device. Recheck the current Devpost rules and complete that demo before claiming Ring-track eligibility.
